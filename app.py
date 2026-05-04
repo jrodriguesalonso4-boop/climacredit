@@ -1021,7 +1021,7 @@ with t1:
             fig_map.update_geos(fitbounds="locations", visible=False, bgcolor="#0A0A0A")
             fig_map.update_layout(**PLOTLY_LAYOUT, height=420,
                 coloraxis_colorbar=dict(title="Score",
-                    tickfont=dict(color="#FFF"), titlefont=dict(color="#FFF")))
+                    tickfont=dict(color="#FFF"), ))
             st.plotly_chart(fig_map, use_container_width=True)
             _ufs_lim = score_ufs_df[score_ufs_df["dados_limitados"]==True]["uf"].tolist()
             if _ufs_lim:
