@@ -2962,7 +2962,7 @@ with t6:
                 **PLOTLY_LAYOUT, height=460,
                 coloraxis_colorbar=dict(
                     title=_viz["cbar"],
-                    tickfont=dict(color="#FFF"), titlefont=dict(color="#FFF"),
+                    tickfont=dict(color="#FFF"),
                 ),
             )
             st.plotly_chart(fig_var, use_container_width=True)
