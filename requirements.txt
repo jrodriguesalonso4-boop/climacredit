@@ -6,3 +6,7 @@ scikit-learn
 requests
 yfinance
 openpyxl
+matplotlib
+streamlit-folium
+folium
+seaborn
