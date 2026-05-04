@@ -1,0 +1,6 @@
+regiao,score,nivel,comp_prec,comp_enso,comp_queimadas,comp_temp,anomalia_pct,oni_ref,focos_7d,fonte_prec
+Sul,35.1,NORMAL,34.9,51.6,18.4,36.1,-16.6,-0.06,553,Open-Meteo/ERA5
+Centro-Oeste,33.5,NORMAL,29.8,48.6,23.4,34.0,13.2,-0.06,1407,Open-Meteo/ERA5
+Norte,33.0,NORMAL,38.7,48.8,8.3,34.2,48.1,-0.06,497,Open-Meteo/ERA5
+Sudeste,28.1,NORMAL,12.8,49.2,24.4,34.4,-1.9,-0.06,853,Open-Meteo/ERA5
+Nordeste,27.1,NORMAL,12.2,48.2,23.0,33.7,-1.5,-0.06,575,Open-Meteo/ERA5

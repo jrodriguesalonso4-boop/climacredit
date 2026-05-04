@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Ambientes virtuais
+venv/
+env/
+.venv/
+.env/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Streamlit secrets (NUNCA subir)
+.streamlit/secrets.toml
+
+# Logs
+*.log
+logs/
+
+# Credenciais e secrets
+.env
+.env.local
+*.key
+*.pem
+credentials.json
+secrets.yaml
+*token*
+*secret*
+
+# Cache e temporários
+.cache/
+*.tmp
+*.bak
+
+# Sistema
+Thumbs.db
+Desktop.ini
