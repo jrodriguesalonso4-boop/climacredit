@@ -1892,6 +1892,16 @@ with t5:
         # e estudos de recovery rate em CRA/LCA brasileiros.
         LGD_DEFAULT = 0.50
 
+        # Multiplicadores de LGD por nível climático (Wrong-Way Risk)
+        # Justificativa: clima extremo afeta valor das garantias reais (safra, terra)
+        # Calibração preliminar baseada em literatura Basel III concentration risk
+        LGD_MULT_CLIMATICO = {
+            "NORMAL": 1.00,
+            "ATENCAO": 1.15,  # +15% — garantias parcialmente comprometidas
+            "CRITICO": 1.30   # +30% — garantias fortemente comprometidas
+        }
+        LGD_TETO = 0.85  # LGD efetiva nunca passa de 85%
+
         # Sensibilidade climática por cultura
         # Café ×1.3: vulnerabilidade alta a geadas e veranicos no SE (ref. EMBRAPA Café).
         # Cana ×0.8: resiliência maior a stress hídrico moderado.
@@ -2029,6 +2039,16 @@ with t5:
                 else:
                     return "NORMAL"
 
+        def lgd_efetiva(lgd_base: float, nivel_climatico: str) -> float:
+            """
+            Calcula LGD efetiva aplicando multiplicador climático (wrong-way risk).
+            lgd_base: vem do slider do gestor (0.30 a 0.80)
+            nivel_climatico: 'NORMAL', 'ATENCAO' ou 'CRITICO'
+            Retorna LGD efetiva, com teto em 85%.
+            """
+            mult = LGD_MULT_CLIMATICO.get(nivel_climatico, 1.0)
+            return min(LGD_TETO, lgd_base * mult)
+
         def _calc_carteira(operacoes, nivel_map, score_map, pd_base, lgd, fator_ajuste,
                            sensib_cultura, hhi_coef, cenario):
             """Calcula EL ajustada para a carteira completa. Retorna (df_res, métricas)."""
@@ -2041,9 +2061,10 @@ with t5:
                 sens       = sensib_cultura.get(op["cultura"], 1.0)
                 pd_ajust   = pd_base * fator * sens
                 pd_acum    = round(1 - (1 - pd_ajust) ** op["prazo_anos"], 4)
-                el_linha   = round(op["valor_mi"] * pd_acum * lgd, 4)
+                lgd_ef     = lgd_efetiva(lgd, nivel_ef)
+                el_linha   = round(op["valor_mi"] * pd_acum * lgd_ef, 4)
 
-                # EL base (sem ajuste climático nem cultura) para referência
+                # EL base (sem ajuste climático nem cultura) para referência — LGD base puro (NORMAL)
                 pd_base_acum = round(1 - (1 - pd_base) ** op["prazo_anos"], 4)
                 el_base_linha = round(op["valor_mi"] * pd_base_acum * lgd, 4)
 
@@ -2057,6 +2078,7 @@ with t5:
                     "EL (R$mi)": el_linha,
                     "_el_base": el_base_linha,
                     "_ead": op["valor_mi"],
+                    "_lgd_ef": lgd_ef,
                 })
             df = pd.DataFrame(rows)
             return df
@@ -2098,6 +2120,53 @@ with t5:
                       f"R$ {ecl:.3f} mi",
                       f"{ecl/total_el_base*100:+.1f}% vs. cenário neutro" if total_el_base > 0 else "",
                       help="EL_ajustada − EL_base (cenário sem clima). Quanto da perda esperada vem do clima atual.")
+
+            # ── LGD Efetiva (Wrong-Way Risk) ──────────────────────────────────
+            lgd_ef_medio = (
+                (df_res["_lgd_ef"] * df_res["_ead"]).sum() / df_res["_ead"].sum()
+                if df_res["_ead"].sum() > 0 else lgd
+            )
+            lgd_ef_delta = lgd_ef_medio - lgd  # quanto o clima elevou o LGD médio
+
+            wa1, wa2, wa3 = st.columns(3)
+            wa1.metric(
+                "LGD base (slider)",
+                f"{lgd*100:.0f}%",
+                help="LGD definido pelo gestor via slider. Representa perda em default sem estresse climático.",
+            )
+            wa2.metric(
+                "LGD efetiva média",
+                f"{lgd_ef_medio*100:.1f}%",
+                f"{lgd_ef_delta*100:+.1f}pp vs. base (wrong-way risk)",
+                help="Média ponderada por EAD da LGD efetiva aplicada a cada operação, conforme nível climático.",
+            )
+            wa3.metric(
+                "Operações com LGD elevada",
+                f"{(df_res['_lgd_ef'] > lgd).sum()} / {len(df_res)}",
+                help="Operações em regiões ATENÇÃO ou CRÍTICO, onde o multiplicador climático elevou a LGD base.",
+            )
+
+            with st.expander("Ver LGD por operação (wrong-way risk detalhado)"):
+                df_lgd_det = df_res[["Região","Cultura","Valor (R$mi)","Risco"]].copy()
+                df_lgd_det["LGD base (%)"]  = f"{lgd*100:.0f}%"
+                df_lgd_det["Mult. climático"] = df_res["Risco"].map(
+                    lambda n: f"×{LGD_MULT_CLIMATICO.get(n, 1.0):.2f}"
+                )
+                df_lgd_det["LGD efetiva (%)"] = df_res["_lgd_ef"].map(lambda v: f"{v*100:.1f}%")
+                st.dataframe(
+                    df_lgd_det.style.map(
+                        lambda v: f"color:{NIVEL_COR.get(v,'#FFF')}",
+                        subset=["Risco"]
+                    ),
+                    use_container_width=True, hide_index=True,
+                )
+
+            st.info(
+                "**Wrong-Way Risk — LGD condicionado ao clima:** "
+                "LGD efetiva incorpora wrong-way risk: clima extremo (CRITICO) eleva LGD em até 30% sobre o base, "
+                "refletindo deterioração das garantias reais (safra, terra). "
+                "Calibração preliminar baseada em Basel III concentration risk."
+            )
 
             # ── Sensibilidade LGD ─────────────────────────────────────────────
             lgd_delta_el = (total_exp * pd_medio/100 * 0.01)  # R$mi por 1pp de LGD adicional
@@ -2146,9 +2215,9 @@ with t5:
             st.caption(
                 f"PD base: 3,1%/ano (BCB/SCR 2019-2023). "
                 f"Fator climático: Normal ×1.0 · Atenção ×{fator_atencao:.1f} · Crítico ×{fator_critico:.1f}. "
-                f"LGD: {lgd*100:.0f}%. "
+                f"LGD base: {lgd*100:.0f}% · LGD efetiva média: {lgd_ef_medio*100:.1f}% (wrong-way risk climático). "
                 f"PD ajustada = PD_base × Fator_climático × Sensibilidade_cultura. "
-                f"EL = EAD × PD_acum × LGD."
+                f"EL = EAD × PD_acum × LGD_efetiva."
             )
 
             # ── Cards HHI e Top-3 regiões ──────────────────────────────────────
@@ -2238,6 +2307,103 @@ with t5:
         st.markdown("#### Exposição Climática — Empresas Listadas Agro")
         st.caption("Score climático = média ponderada do ClimaRisk Score por região, usando exposição geográfica de cada empresa.")
 
+        # ───────────────────────────────────────────────────────────────────────
+        # Sensibilidade climática setorial por ticker (Alternativa A — V1)
+        # ───────────────────────────────────────────────────────────────────────
+        # Reflete elasticidade climática diferenciada por modelo de negócio:
+        # - Pure-play agrícola (>1.0): EBITDA depende diretamente de yield físico
+        # - Integrado / hedged (<1.0): operação global ou de jusante mitiga clima
+        # Calibração preliminar baseada em análise qualitativa de relatórios anuais
+        # e modelo de negócio. V2: calibração via correlação histórica EBITDA × ENSO.
+        SENS_EQUITY = {
+            # Pure-play agro (alta sensibilidade)
+            "AGRO3": 1.20,   # BrasilAgro — soja, milho, cana, gado
+            "SLCE3": 1.30,   # SLC Agrícola — pure-play soja/milho/algodão
+            "TTEN3": 1.20,   # 3tentos — insumos + originação grãos
+            "SMTO3": 1.10,   # São Martinho — cana (ciclo longo, mitigador)
+            "CAML3": 1.15,   # Camil — arroz/feijão/açúcar
+            "RAIZ4": 0.90,   # Raízen — etanol + distribuição (parte downstream)
+            # Frigoríficos (sensibilidade média a baixa via custo de ração)
+            "BEEF3": 0.90,   # Minerva — boi, exposição global parcial
+            "JBSS3": 0.60,   # JBS — global, hedging por geografia
+            "BRFS3": 0.70,   # BRF — frangos+suínos, integrado
+            "MRFG3": 0.85,   # Marfrig — boi + USA
+            # Indústria alimentícia (baixa sensibilidade direta)
+            "MDIA3": 0.50,   # M.Dias Branco — biscoitos/massas, downstream
+            # Energia/Logística agro (sensibilidade indireta)
+            "CSAN3": 0.80,   # Cosan — holding diversificada
+            "VBBR3": 0.60,   # Vibra — combustíveis, downstream
+            # Papel/Celulose (sensibilidade média via plantação)
+            "SUZB3": 0.85,   # Suzuano — eucalipto plantado
+            "KLBN3": 0.85,   # Klabin — celulose + papel
+        }
+
+        # ───────────────────────────────────────────────────────────────────────
+        # Contexto setorial interpretativo por ticker (Alternativa C — V1)
+        # ───────────────────────────────────────────────────────────────────────
+        EQUITY_CONTEXTO = {
+            "AGRO3": {
+                "setor": "Pure-play agro diversificado",
+                "comentario": "BrasilAgro depende diretamente de yield físico. ENSO afeta diretamente EBITDA via produtividade de soja, milho, cana e pecuária.",
+            },
+            "SLCE3": {
+                "setor": "Pure-play grãos e fibras",
+                "comentario": "SLC Agrícola é a maior pure-play listada. Sem hedging downstream — clima ruim reflete em receita do trimestre seguinte.",
+            },
+            "TTEN3": {
+                "setor": "Insumos + originação grãos",
+                "comentario": "3tentos opera nos dois lados: vende insumos no plantio e origina grãos na colheita. Clima ruim reduz volume nas duas pontas.",
+            },
+            "SMTO3": {
+                "setor": "Cana-de-açúcar (ciclo longo)",
+                "comentario": "São Martinho mitiga clima via ciclo de cana de 12-18 meses. Sensibilidade menor que pure-play grãos, mas ATR sofre em estresse hídrico.",
+            },
+            "CAML3": {
+                "setor": "Arroz, feijão e açúcar",
+                "comentario": "Camil é exposta a múltiplas commodities. Arroz no RS é o maior driver — La Niña pode reduzir oferta e elevar margem.",
+            },
+            "RAIZ4": {
+                "setor": "Etanol + distribuição (Raízen)",
+                "comentario": "Raízen tem operação dual: cana (upstream) e distribuição combustível (downstream). Hedging parcial via parte downstream.",
+            },
+            "BEEF3": {
+                "setor": "Frigorífico boi",
+                "comentario": "Minerva — exposição CO/PA. Custo de ração e qualidade de pasto dependem de clima. Exportação parcial mitiga.",
+            },
+            "JBSS3": {
+                "setor": "Frigorífico global",
+                "comentario": "JBS é diversificada globalmente (Brasil, USA, Austrália). Clima Brasil afeta apenas parcela da operação consolidada.",
+            },
+            "BRFS3": {
+                "setor": "Proteínas integradas",
+                "comentario": "BRF é integrada (granja → processamento). Custo de ração (milho/soja) é o canal climático principal.",
+            },
+            "MRFG3": {
+                "setor": "Frigorífico boi + EUA",
+                "comentario": "Marfrig combina Brasil e USA. Diversificação geográfica reduz exposição climática líquida.",
+            },
+            "MDIA3": {
+                "setor": "Indústria alimentícia",
+                "comentario": "M.Dias Branco compra trigo internacional. Clima Brasil tem impacto indireto via custo de farinha.",
+            },
+            "CSAN3": {
+                "setor": "Holding diversificada (Cosan)",
+                "comentario": "Cosan tem participação em Raízen, Rumo (logística agro), Compass (gás). Exposição diluída.",
+            },
+            "VBBR3": {
+                "setor": "Distribuição combustíveis",
+                "comentario": "Vibra é downstream — clima afeta indiretamente via demanda de etanol e diesel agrícola.",
+            },
+            "SUZB3": {
+                "setor": "Celulose (eucalipto)",
+                "comentario": "Suzano tem plantação própria de eucalipto. Ciclo longo (7 anos) e manejo florestal mitigam clima de curto prazo.",
+            },
+            "KLBN3": {
+                "setor": "Celulose e papel",
+                "comentario": "Klabin opera floresta + indústria. Sensibilidade similar a SUZB3 — eucalipto plantado é resiliente.",
+            },
+        }
+
         # Banco interno: 15 empresas com exposição geográfica documentada
         # Fonte: Relatórios Anuais / ITRs das companhias
         EQUITY_DB = pd.DataFrame([
@@ -2262,18 +2428,31 @@ with t5:
         # Calcula score climático para cada empresa
         if has_score:
             sr = score_df.set_index("regiao")["score"].to_dict()
-            EQUITY_DB["score_clima"] = (
+            # Score geográfico bruto: média ponderada pela exposição regional
+            EQUITY_DB["score_geo"] = (
                 EQUITY_DB["exp_CO"] * sr.get("Centro-Oeste",50) +
                 EQUITY_DB["exp_NE"] * sr.get("Nordeste",50) +
                 EQUITY_DB["exp_SE"] * sr.get("Sudeste",50) +
                 EQUITY_DB["exp_S"]  * sr.get("Sul",50) +
                 EQUITY_DB["exp_N"]  * sr.get("Norte",50)
             ).round(1)
+            # Score ajustado por sensibilidade setorial (multiplicador de modelo de negócio)
+            EQUITY_DB["sens_mult"] = EQUITY_DB["ticker"].map(
+                lambda t: SENS_EQUITY.get(t, 1.0)
+            )
+            EQUITY_DB["score_clima"] = EQUITY_DB.apply(
+                lambda r: round(max(0.0, min(100.0, r["score_geo"] * r["sens_mult"])), 1),
+                axis=1,
+            )
+            EQUITY_DB["delta_sens"] = (EQUITY_DB["score_clima"] - EQUITY_DB["score_geo"]).round(1)
             EQUITY_DB["nivel"] = EQUITY_DB["score_clima"].apply(
                 lambda s: "CRITICO" if s>=70 else ("ATENCAO" if s>=45 else "NORMAL")
             )
         else:
+            EQUITY_DB["score_geo"]   = 50.0
             EQUITY_DB["score_clima"] = 50.0
+            EQUITY_DB["sens_mult"]   = 1.0
+            EQUITY_DB["delta_sens"]  = 0.0
             EQUITY_DB["nivel"] = "—"
 
         # ── Busca livre por ticker ou nome ─────────────────────────────────
@@ -2319,20 +2498,66 @@ with t5:
             color="score_clima" if has_score else "exp_CO",
             color_continuous_scale=[[0,"#00B4A2"],[0.45,"#F5A623"],[0.7,"#FF4444"],[1,"#8B0000"]],
             range_color=(0,100), text="score_clima" if has_score else None,
-            hover_data={"empresa":True,"setor":True,"notas":True},
-            labels={"score_clima":"Score Climático","ticker":""},
+            hover_data={"empresa":True,"setor":True,"score_geo":True,"sens_mult":True,"notas":True},
+            labels={"score_clima":"Score Ajustado","ticker":""},
         )
         fig_eq.update_layout(**PLOTLY_LAYOUT, height=320, coloraxis_showscale=False)
         st.plotly_chart(fig_eq, use_container_width=True)
 
         # Tabela detalhada
-        cols_show = ["ticker","empresa","setor","score_clima","nivel","notas"] if has_score else ["ticker","empresa","setor","notas"]
-        st.dataframe(
-            df_show[cols_show].style.map(
-                lambda v: f"color:{NIVEL_COR.get(v,'#FFF')}", subset=["nivel"] if has_score else []
-            ),
-            use_container_width=True, hide_index=True,
-        )
+        if has_score:
+            cols_show = ["ticker","empresa","setor","score_geo","sens_mult","score_clima","delta_sens","nivel","notas"]
+            st.dataframe(
+                df_show[cols_show].rename(columns={
+                    "score_geo":   "Score Geo (bruto)",
+                    "sens_mult":   "Mult. Setorial",
+                    "score_clima": "Score Ajustado",
+                    "delta_sens":  "Δ Sensibilidade",
+                }).style.map(
+                    lambda v: f"color:{NIVEL_COR.get(v,'#FFF')}", subset=["nivel"]
+                ).format({
+                    "Score Geo (bruto)": "{:.1f}",
+                    "Mult. Setorial":    "{:.2f}",
+                    "Score Ajustado":    "{:.1f}",
+                    "Δ Sensibilidade":   "{:+.1f}",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "**Score Geo (bruto):** média ponderada do ClimaRisk Score por região de exposição. "
+                "**Mult. Setorial:** fator de elasticidade climática por modelo de negócio (pure-play agro > 1.0; "
+                "downstream/global < 1.0). "
+                "**Score Ajustado:** Score Geo × Mult. Setorial, limitado a [0, 100]. "
+                "**Δ Sensibilidade:** efeito líquido do multiplicador. "
+                "[Calibração V1 — qualitativa. V2: correlação histórica EBITDA × ENSO.]"
+            )
+        else:
+            cols_show = ["ticker","empresa","setor","notas"]
+            st.dataframe(df_show[cols_show], use_container_width=True, hide_index=True)
+
+        # ── Contexto interpretativo por empresa (Alternativa C) ────────────────
+        st.markdown("---")
+        st.markdown("**Contexto setorial — canal climático por empresa**")
+        _ctx_rows = list(df_show.itertuples(index=False))
+        for _ci in range(0, len(_ctx_rows), 3):
+            _chunk = _ctx_rows[_ci:_ci+3]
+            cols_ctx = st.columns(len(_chunk))
+            for _col, row in zip(cols_ctx, _chunk):
+                with _col:
+                    _ctx = EQUITY_CONTEXTO.get(row.ticker, {})
+                    _setor_ctx   = _ctx.get("setor", "Setor não classificado")
+                    _coment_ctx  = _ctx.get("comentario", "Cobertura interpretativa será expandida em V2.")
+                    _nivel_cor_ctx = NIVEL_COR.get(row.nivel, "#888") if has_score else "#888"
+                    _score_txt = f"{row.score_clima:.1f}" if has_score else "—"
+                    html_card(f"""
+<div style="background:#111;border:1px solid #1E1E1E;border-radius:10px;padding:14px">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+    <span style="font-weight:700;font-size:.95rem;color:#FFF">{row.ticker}</span>
+    <span style="font-size:.78rem;font-weight:700;color:{_nivel_cor_ctx}">{row.nivel if has_score else '—'} ({_score_txt})</span>
+  </div>
+  <div style="font-size:.75rem;color:#F5A623;margin-bottom:6px">{_setor_ctx}</div>
+  <div style="font-size:.78rem;color:#AAA;line-height:1.45">{_coment_ctx}</div>
+</div>""")
 
         with st.expander("📊 Detalhamento de exposição geográfica por empresa"):
             exp_cols = ["ticker","empresa","exp_CO","exp_NE","exp_SE","exp_S","exp_N"]
@@ -2348,6 +2573,71 @@ with t5:
     # ── Commodities ───────────────────────────────────────────────────────────
     with tab_comm5:
         st.markdown("#### Impacto Esperado em Preços — ENSO × Commodities")
+
+        # ── Fatores não modelados por commodity (Alternativa C — V1) ─────────────
+        FATORES_NAO_MODELADOS = {
+            "Soja": [
+                "Estoques USDA (relação stock/use ratio)",
+                "Demanda chinesa (50%+ do consumo global)",
+                "Tarifas comerciais (China, EUA, Argentina)",
+                "Posição na curva CBOT (term structure)",
+                "Câmbio ARS/BRL (competidor argentino)",
+            ],
+            "Milho": [
+                "Estoques USDA",
+                "Demanda etanol EUA (40% da safra americana)",
+                "Demanda ração global",
+                "Safrinha brasileira (25-30% da oferta nacional)",
+            ],
+            "Café": [
+                "Estoques certificados ICE",
+                "Política Vietnã (segundo maior produtor)",
+                "Demanda emergente Ásia",
+                "Mix arábica/conilon",
+            ],
+            "Cana-de-açúcar": [
+                "Política governamental etanol/açúcar (mix)",
+                "Demanda global açúcar (Índia, China)",
+                "Preço internacional petróleo (substituto etanol)",
+                "ATR — Açúcar Total Recuperável",
+            ],
+            "Algodão": [
+                "Demanda têxtil global",
+                "Concorrência fibras sintéticas",
+                "Estoques China (maior estocador)",
+                "Subsídios EUA (USDA Farm Bill)",
+            ],
+            "Arroz": [
+                "Política exportação Índia, Vietnã, Tailândia",
+                "Estoques estratégicos asiáticos",
+                "Câmbio ARS (concorrente)",
+                "Substituição com trigo",
+            ],
+            "Feijão": [
+                "Mercado predominantemente doméstico",
+                "Política CONAB (estoques reguladores)",
+                "Múltiplas safras/ano",
+                "Preferência regional brasileira",
+            ],
+            "Trigo": [
+                "Importação brasileira (~50% do consumo)",
+                "Crise Mar Negro (Rússia, Ucrânia)",
+                "Preço internacional (Chicago)",
+                "Concorrência farinha argentina",
+            ],
+            "Laranja": [
+                "Estoques FCOJ Florida",
+                "Demanda suco UE e Ásia",
+                "Greening (doença) — pressão estrutural oferta",
+                "Política tarifária EUA",
+            ],
+            "Boi Gordo": [
+                "Custo do milho (insumo principal de ração)",
+                "Demanda chinesa (HiloPork influence)",
+                "Embargo sanitário (vaca louca, etc.)",
+                "Câmbio (45% da carne é exportada)",
+            ],
+        }
 
         # ── Configuração de commodities ────────────────────────────────────────
         # Coef. ENSO → Iizumi et al. 2014 (yield impact) × elasticidade simplificada preço/yield.
@@ -2610,6 +2900,22 @@ with t5:
             "IC 80% derivado de vol. histórica anualizada × magnitude relativa ONI. "
             "[CALIBRAÇÃO PRELIMINAR — ponderação a calibrar com modelo econométrico em V2]"
         )
+
+        st.caption("Use o resultado como sinal direcional, não como projeção pontual.")
+
+        # ── Fatores não modelados por commodity (Alternativa C) ───────────────
+        st.markdown("---")
+        st.markdown("**Fatores não modelados — contexto por commodity**")
+        for comm_nm in df_c["Commodity"]:
+            fatores = FATORES_NAO_MODELADOS.get(comm_nm, [])
+            with st.expander(f"📋 Fatores não modelados — {comm_nm}"):
+                st.markdown("**Drivers de preço NÃO incorporados no modelo atual:**")
+                for fator in fatores:
+                    st.markdown(f"- {fator}")
+                st.caption(
+                    "Estes fatores influenciam o preço de mercado de forma significativa. "
+                    "Modelo atual estima apenas o canal climático físico via ENSO."
+                )
 
         # ── Gráfico histórico com eixo duplo e marcadores ENSO ────────────────
         if has_oni:
